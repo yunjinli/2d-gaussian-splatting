@@ -1,0 +1,48 @@
+[workspace]
+name = "surfel_splatting"
+version = "0.1.0"
+description = "Surfel Splatting environment"
+channels = ["nvidia", "pytorch", "conda-forge"]
+# Removed win-64 so Pixi only solves for your current Linux environment
+platforms = ["linux-64"] 
+
+[system-requirements]
+cuda = "11.8"
+
+[dependencies]
+python = "3.8.18.*"
+pip = "23.3.1.*"
+ffmpeg = "4.2.2.*"
+pillow = "<10" 
+typing_extensions = "4.9.0.*"
+
+pytorch = "2.0.0.*"
+torchvision = "0.15.0.*"
+torchaudio = "2.0.0.*"
+mkl = "<2024.0"
+
+# --- The CUDA Magic ---
+pytorch-cuda = "11.8.*"
+cuda-toolkit = "11.8.*"
+cuda-nvcc = "11.8.*"      # Explicitly grab the compiler
+cuda-version = "11.8.*"   # Tell all conda-forge packages to align to 11.8
+
+gcc_linux-64 = "11.*"
+gxx_linux-64 = "11.*"
+ninja = "*"
+
+[pypi-dependencies]
+open3d = "==0.18.0"
+mediapy = "==1.1.2"
+lpips = "==0.1.4"
+scikit-image = "==0.21.0"
+tqdm = "==4.66.2"
+trimesh = "==4.3.2"
+plyfile = "*"
+opencv-python = "*"
+
+diff-surfel-rasterization = { path = "submodules/diff-surfel-rasterization"}
+simple-knn = { path = "submodules/simple-knn"}
+
+[pypi-options]
+no-build-isolation = ["diff-surfel-rasterization", "simple-knn"]
