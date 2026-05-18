@@ -79,6 +79,8 @@ class Scene:
                                                            "point_cloud",
                                                            "iteration_" + str(self.loaded_iter),
                                                            "point_cloud.ply"))
+        elif getattr(args, 'init_mesh', '') and os.path.exists(args.init_mesh):
+            self.gaussians.create_from_mesh(args.init_mesh, self.cameras_extent)
         else:
             self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent)
 

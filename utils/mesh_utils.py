@@ -3,7 +3,7 @@
 # SVIP research group, https://github.com/svip-lab
 # All rights reserved.
 #
-# This software is free for non-commercial, research and evaluation use 
+# This software is free for non-commercial, research and evaluation use
 # under the terms of the LICENSE.md file.
 #
 # For inquiries contact  huangbb@shanghaitech.edu.cn
@@ -56,8 +56,8 @@ def to_cam_open3d(viewpoint_stack):
             width=viewpoint_cam.image_width,
             height=viewpoint_cam.image_height,
             cx = intrins[0,2].item(),
-            cy = intrins[1,2].item(), 
-            fx = intrins[0,0].item(), 
+            cy = intrins[1,2].item(),
+            fx = intrins[0,0].item(),
             fy = intrins[1,1].item()
         )
 
@@ -115,7 +115,7 @@ class GaussianExtractor(object):
             # self.alphamaps.append(alpha.cpu())
             # self.normals.append(normal.cpu())
             # self.depth_normals.append(depth_normal.cpu())
-        
+
         # self.rgbmaps = torch.stack(self.rgbmaps, dim=0)
         # self.depthmaps = torch.stack(self.depthmaps, dim=0)
         # self.alphamaps = torch.stack(self.alphamaps, dim=0)
@@ -140,7 +140,7 @@ class GaussianExtractor(object):
     def extract_mesh_bounded(self, voxel_size=0.004, sdf_trunc=0.02, depth_trunc=3, mask_backgrond=True):
         """
         Perform TSDF fusion given a fixed depth range, used in the paper.
-        
+
         voxel_size: the voxel size of the volume
         sdf_trunc: truncation value
         depth_trunc: maximum depth range, should depended on the scene's scales
@@ -162,7 +162,7 @@ class GaussianExtractor(object):
         for i, cam_o3d in tqdm(enumerate(to_cam_open3d(self.viewpoint_stack)), desc="TSDF integration progress"):
             rgb = self.rgbmaps[i]
             depth = self.depthmaps[i]
-            
+
             # if we have mask provided, use it
             if mask_backgrond and (self.viewpoint_stack[i].gt_alpha_mask is not None):
                 depth[(self.viewpoint_stack[i].gt_alpha_mask < 0.5)] = 0
@@ -183,13 +183,13 @@ class GaussianExtractor(object):
     @torch.no_grad()
     def extract_mesh_unbounded(self, resolution=1024):
         """
-        Experimental features, extracting meshes from unbounded scenes, not fully test across datasets. 
+        Experimental features, extracting meshes from unbounded scenes, not fully test across datasets.
         return o3d.mesh
         """
         def contract(x):
             mag = torch.linalg.norm(x, ord=2, dim=-1)[..., None]
             return torch.where(mag < 1, x, (2 - (1 / mag)) * (x / mag))
-        
+
         def uncontract(y):
             mag = torch.linalg.norm(y, ord=2, dim=-1)[..., None]
             return torch.where(mag < 1, y, (1 / (2-mag) * (y/mag)))
@@ -241,7 +241,7 @@ class GaussianExtractor(object):
                 rgbs[mask_proj] = (rgbs[mask_proj] * w[:,None] + rgb[mask_proj]) / wp[:,None]
                 # update weight
                 weights[mask_proj] = wp
-            
+
             if return_rgb:
                 return tsdfs, rgbs
 
@@ -269,7 +269,7 @@ class GaussianExtractor(object):
             resolution=N,
             inv_contraction=inv_contraction,
         )
-        
+
         # coloring the mesh
         torch.cuda.empty_cache()
         mesh = mesh.as_open3d

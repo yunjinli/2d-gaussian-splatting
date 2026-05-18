@@ -19,7 +19,7 @@ from plyfile import PlyData, PlyElement
 from utils.sh_utils import RGB2SH
 from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
-from utils.general_utils import strip_symmetric, build_scaling_rotation
+from utils.general_utils import strip_symmetric, build_scaling_rotation, create_rotation_matrix_from_direction_vector_batch
 
 class GaussianModel:
 
@@ -144,6 +144,142 @@ class GaussianModel:
         self._rotation = nn.Parameter(rots.requires_grad_(True))
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+
+    def create_from_mesh(self, mesh_path: str, spatial_lr_scale: float):
+        """
+        Initialize one 2DGS surfel per mesh face in world coordinates.
+
+        Rotation is derived from the face normal so each disk lies flat on the
+        surface.  Scale is set from the mean edge length of each face.
+        Opacity is initialised high (0.8) because we know the surface exists.
+        Colors are sampled from the UV texture (or vertex colors as fallback).
+        """
+        import trimesh
+        from scipy.spatial.transform import Rotation as ScipyRotation
+
+        self.spatial_lr_scale = spatial_lr_scale
+
+        # ---- load scene ----
+        scene = trimesh.load(mesh_path, force='scene')
+        sub_verts_list, sub_faces_list = [], []
+        sub_uvs_list, sub_tex_list, sub_vc_list = [], [], []
+        face_offset = 0
+
+        for node_name in scene.graph.nodes_geometry:
+            transform, geom_name = scene.graph[node_name]
+            geom = scene.geometry[geom_name].copy()
+            geom.apply_transform(transform)
+
+            v = np.array(geom.vertices, dtype=np.float32)
+            f = np.array(geom.faces,    dtype=np.int32)
+            sub_verts_list.append(v)
+            sub_faces_list.append(f + face_offset)
+            face_offset += len(v)
+
+            uvs, tex, vc = None, None, None
+            if isinstance(geom.visual, trimesh.visual.color.ColorVisuals):
+                try:
+                    vc_raw = np.array(geom.visual.vertex_colors, dtype=np.float32)
+                    vc = vc_raw[:, :3] / 255.0
+                except Exception:
+                    vc = np.full((len(v), 3), 0.8, dtype=np.float32)
+            elif isinstance(geom.visual, trimesh.visual.texture.TextureVisuals):
+                try:
+                    uvs = np.array(geom.visual.uv, dtype=np.float32)
+                    mat = geom.visual.material
+                    img = getattr(mat, 'image', None) or getattr(mat, 'baseColorTexture', None)
+                    if img is not None:
+                        tex = np.array(img.convert('RGB'), dtype=np.float32) / 255.0
+                except Exception:
+                    uvs = None
+                
+                if uvs is None:
+                    try:
+                        vc_raw = np.array(geom.visual.to_color().vertex_colors, dtype=np.float32)
+                        vc = vc_raw[:, :3] / 255.0
+                    except Exception:
+                        vc = np.full((len(v), 3), 0.8, dtype=np.float32)
+            else:
+                vc = np.full((len(v), 3), 0.8, dtype=np.float32)
+
+            sub_uvs_list.append(uvs)
+            sub_tex_list.append(tex)
+            sub_vc_list.append(vc)
+
+        all_verts = np.concatenate(sub_verts_list, axis=0)
+        all_faces = np.concatenate(sub_faces_list, axis=0)
+
+        # ---- per-face geometry ----
+        v0 = all_verts[all_faces[:, 0]]
+        v1 = all_verts[all_faces[:, 1]]
+        v2 = all_verts[all_faces[:, 2]]
+
+        centroids = (v0 + v1 + v2) / 3.0                       # (F,3)
+
+        face_normals = np.cross(v1 - v0, v2 - v0)              # (F,3) unnormalised
+        norms = np.linalg.norm(face_normals, axis=1, keepdims=True).clip(1e-8)
+        face_normals = (face_normals / norms).astype(np.float32)
+
+        e01 = np.linalg.norm(v1 - v0, axis=1)
+        e12 = np.linalg.norm(v2 - v1, axis=1)
+        e20 = np.linalg.norm(v0 - v2, axis=1)
+        mean_edge = ((e01 + e12 + e20) / 3.0).clip(1e-8)       # (F,)
+
+        # ---- face colors ----
+        # Build per-submesh face index ranges to sample colors
+        face_colors = np.full((len(all_faces), 3), 0.8, dtype=np.float32)
+        face_start = 0
+        vert_start = 0
+        for uvs, tex, vc, sv, sf in zip(sub_uvs_list, sub_tex_list, sub_vc_list,
+                                         sub_verts_list, sub_faces_list):
+            nf = len(sf)
+            local_faces = all_faces[face_start:face_start + nf] - vert_start
+            if uvs is not None and tex is not None:
+                cuv = uvs[local_faces].mean(axis=1)             # (nf,2)
+                th, tw = tex.shape[:2]
+                px = (cuv[:, 0]        * (tw - 1)).astype(int).clip(0, tw - 1)
+                py = ((1 - cuv[:, 1]) * (th - 1)).astype(int).clip(0, th - 1)
+                face_colors[face_start:face_start + nf] = tex[py, px, :3]
+            elif vc is not None:
+                face_colors[face_start:face_start + nf] = vc[local_faces].mean(axis=1)
+            face_start += nf
+            vert_start += len(sv)
+
+        # ---- rotations from face normals ----
+        normals_t = torch.tensor(face_normals, dtype=torch.float32)
+        rot_mats  = create_rotation_matrix_from_direction_vector_batch(normals_t).numpy()  # (F,3,3)
+        # scipy returns (x,y,z,w); 2DGS uses (w,x,y,z)
+        quats_xyzw = ScipyRotation.from_matrix(rot_mats).as_quat()    # (F,4)
+        quats_wxyz  = np.roll(quats_xyzw, 1, axis=1).astype(np.float32)  # (F,4)
+
+        # ---- scales: log(mean_edge / 2) for both tangent axes ----
+        log_scale = np.log(mean_edge / 2.0).astype(np.float32)
+        scales    = np.stack([log_scale, log_scale], axis=1)   # (F,2)
+
+        # ---- SH colors ----
+        colors_t  = torch.tensor(face_colors, dtype=torch.float32, device='cuda')
+        fused_sh  = RGB2SH(colors_t)
+        features  = torch.zeros(
+            (len(centroids), 3, (self.max_sh_degree + 1) ** 2), device='cuda')
+        features[:, :3, 0] = fused_sh
+
+        xyz      = torch.tensor(centroids,  dtype=torch.float32, device='cuda')
+        rots     = torch.tensor(quats_wxyz, dtype=torch.float32, device='cuda')
+        scl      = torch.tensor(scales,     dtype=torch.float32, device='cuda')
+        opacities = self.inverse_opacity_activation(
+            0.8 * torch.ones((len(centroids), 1), device='cuda'))
+
+        print(f"Mesh init: {len(centroids)} surfels from {mesh_path}")
+
+        self._xyz         = nn.Parameter(xyz.requires_grad_(True))
+        self._features_dc = nn.Parameter(
+            features[:, :, 0:1].transpose(1, 2).contiguous().requires_grad_(True))
+        self._features_rest = nn.Parameter(
+            features[:, :, 1:].transpose(1, 2).contiguous().requires_grad_(True))
+        self._scaling  = nn.Parameter(scl.requires_grad_(True))
+        self._rotation = nn.Parameter(rots.requires_grad_(True))
+        self._opacity  = nn.Parameter(opacities.requires_grad_(True))
+        self.max_radii2D = torch.zeros(len(centroids), device='cuda')
 
     def training_setup(self, training_args):
         self.percent_dense = training_args.percent_dense
